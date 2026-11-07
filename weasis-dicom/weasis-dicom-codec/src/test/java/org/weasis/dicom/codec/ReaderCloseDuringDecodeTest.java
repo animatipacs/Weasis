@@ -35,13 +35,15 @@ import org.weasis.opencv.data.PlanarImage;
  * parse state ({@code iis}, {@code dis}, {@code tsuid}) is cleared, as after a {@code close()} with
  * no decode in flight. The private fields are read by reflection; the reader gains no accessor.
  *
- * <p>While the decode is held, {@code close()} returns and the state the decode reads ({@code dis},
- * {@code tsuid}) must still be set: the test pins the plan's design, where decodes in flight are
- * counted around the protected {@code getImageFragment(MediaElement, int)} and a {@code reset()}
- * that arrives meanwhile is deferred until the last one ends (FCR §2 item 4 also allows a {@code
- * close()} that waits instead; that design would not return while the decode is held). {@code dis}
- * and {@code tsuid} carry the reset check: {@code iis} is null after every header read, so its
- * check holds for any implementation.
+ * <p>While the decode is held, {@code close()} returns and {@code dis} and {@code tsuid} must still
+ * be set: they are the parse state a reset clears, so their still being set while the decode is
+ * held shows that the reset of {@code close()} was deferred (the AC-5 fixture of FCR §2 <i>Failing
+ * fixtures</i>, where {@code close()} clears them under the running decode). The test pins the
+ * plan's design, where decodes in flight are counted around the protected {@code
+ * getImageFragment(MediaElement, int)} and a {@code reset()} that arrives meanwhile is deferred
+ * until the last one ends (FCR §2 item 4 also allows a {@code close()} that waits instead; that
+ * design would not return while the decode is held). {@code dis} and {@code tsuid} carry the reset
+ * check: {@code iis} is null after every header read, so its check holds for any implementation.
  *
  * <p>A second scenario, on a multi-frame RLE lossless reader, checks what that reset leaves behind:
  * the reader's header is no longer in the header cache, as after a {@code close()} with no decode
@@ -127,7 +129,7 @@ public class ReaderCloseDuringDecodeTest {
           .as("the decode of frame %d started", FRAME)
           .isTrue();
       assertThat(new Object[] {field(reader, "dis"), field(reader, "tsuid")})
-          .as("dis and tsuid, which the decode reads, set before close() is called")
+          .as("dis and tsuid, the parse state a reset clears, set before close() is called")
           .doesNotContainNull();
       closer.start();
       closer.join(TimeUnit.SECONDS.toMillis(10));
@@ -136,8 +138,9 @@ public class ReaderCloseDuringDecodeTest {
       Object tsuidDuring = field(reader, "tsuid");
       assertThat(new Object[] {disDuring, tsuidDuring})
           .as(
-              "close() returned while the decode of frame %d was held and did not clear the state"
-                  + " the decode reads: dis=%s, tsuid=%s",
+              "close() returned while the decode of frame %d was held and did not clear dis and"
+                  + " tsuid, the parse state a reset clears, so its reset was deferred: dis=%s,"
+                  + " tsuid=%s",
               FRAME,
               disDuring,
               tsuidDuring)

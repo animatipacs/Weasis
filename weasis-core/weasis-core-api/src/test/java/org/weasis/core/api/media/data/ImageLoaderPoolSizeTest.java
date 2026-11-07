@@ -84,4 +84,11 @@ public class ImageLoaderPoolSizeTest {
     assertThat(size(null, 2, 4096)).isEqualTo(4);
     assertThat(warnings).as("warnings").isEmpty();
   }
+
+  @Test
+  public void capBoundsTheSize() {
+    // max(2, min(min(16, 4096 / 100), 2 x 16)) = 16
+    assertThat(size(null, 16, 4096)).isEqualTo(16);
+    assertThat(warnings).as("warnings").isEmpty();
+  }
 }
