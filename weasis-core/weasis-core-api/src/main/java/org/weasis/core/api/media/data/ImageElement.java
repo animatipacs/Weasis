@@ -18,6 +18,12 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import org.opencv.core.Core.MinMaxLocResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +35,6 @@ import org.weasis.core.api.image.ZoomOp;
 import org.weasis.core.api.image.cv.CvUtil;
 import org.weasis.core.api.image.measure.MeasurementsAdapter;
 import org.weasis.core.api.image.util.Unit;
-import org.weasis.core.api.util.ThreadUtil;
 import org.weasis.opencv.data.LookupTableCV;
 import org.weasis.opencv.data.PlanarImage;
 import org.weasis.opencv.op.ImageConversion;
@@ -38,8 +43,23 @@ import org.weasis.opencv.op.ImageProcessor;
 public class ImageElement extends MediaElement {
   private static final Logger LOGGER = LoggerFactory.getLogger(ImageElement.class);
 
-  public static final ExecutorService IMAGE_LOADER =
-      ThreadUtil.buildNewSingleThreadExecutor("Image Loader"); // NON-NLS
+  /** The system property that sets the number of image loader threads ({@code 1}: one thread). */
+  static final String IMAGE_LOADER_THREADS = "weasis.image.loader.threads"; // NON-NLS
+
+  /**
+   * The decode pool: a fixed number of daemon threads named {@code Image Loader-<n>}, sized by
+   * {@link #imageLoaderPoolSize}, with an unbounded queue, so that a submission never blocks, never
+   * drops a task and never runs it on the submitting thread.
+   */
+  private static final ThreadPoolExecutor IMAGE_LOADER_POOL =
+      newImageLoaderPool(
+          imageLoaderPoolSize(
+              System.getProperty(IMAGE_LOADER_THREADS),
+              Runtime.getRuntime().availableProcessors(),
+              Runtime.getRuntime().maxMemory(),
+              LOGGER::warn));
+
+  public static final ExecutorService IMAGE_LOADER = IMAGE_LOADER_POOL;
 
   private static final NativeCache<ImageElement, PlanarImage> mCache =
       new NativeCache<ImageElement, PlanarImage>(Runtime.getRuntime().maxMemory() / 2) {
@@ -73,6 +93,66 @@ public class ImageElement extends MediaElement {
 
   public ImageElement(MediaReader mediaIO, Object key) {
     super(mediaIO, key);
+  }
+
+  /**
+   * The number of image loader threads: the value of {@link #IMAGE_LOADER_THREADS} when it is an
+   * integer of 1 or more ({@code 1} is a single thread), otherwise {@code max(2, min(min(16,
+   * maxHeapMB / 100), 2 x processors))}. A value that is given and rejected is reported to {@code
+   * warning}.
+   *
+   * @param property the value of the property, or null when it is not set
+   * @param processors the available processors
+   * @param maxMemory the maximum heap, in bytes
+   * @param warning receives the warning about a rejected value
+   * @return the pool size, 1 or more
+   */
+  static int imageLoaderPoolSize(
+      String property, int processors, long maxMemory, Consumer<String> warning) {
+    long maxHeapMB = maxMemory / (1024L * 1024L);
+    int size = (int) Math.max(2L, Math.min(Math.min(16L, maxHeapMB / 100L), 2L * processors));
+    if (property != null) {
+      try {
+        int value = Integer.parseInt(property);
+        if (value >= 1) {
+          return value;
+        }
+      } catch (NumberFormatException e) {
+        // reported below
+      }
+      warning.accept(
+          String.format(
+              "Invalid value of %s: '%s', it must be an integer of 1 or more; using %d threads",
+              IMAGE_LOADER_THREADS, property, size));
+    }
+    return size;
+  }
+
+  private static ThreadPoolExecutor newImageLoaderPool(int size) {
+    AtomicInteger threadNumber = new AtomicInteger(1);
+    ThreadFactory factory =
+        r -> {
+          Thread t = new Thread(r, "Image Loader-" + threadNumber.getAndIncrement()); // NON-NLS
+          t.setDaemon(true);
+          return t;
+        };
+    return new ThreadPoolExecutor(
+        size, size, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), factory);
+  }
+
+  /**
+   * Cancels a task submitted to {@link #IMAGE_LOADER} whose caller no longer waits for it, and
+   * removes it from the queue if no thread has taken it yet (a cancelled task stays queued
+   * otherwise, keeping its element reachable). A task already running finishes and its result is
+   * discarded.
+   *
+   * @param future the future returned by {@code IMAGE_LOADER.submit()}
+   */
+  static void cancelImageLoading(Future<?> future) {
+    future.cancel(true);
+    if (future instanceof Runnable) {
+      IMAGE_LOADER_POOL.remove((Runnable) future);
+    }
   }
 
   public static int getNumberOfImagesInCache() {
@@ -367,25 +447,39 @@ public class ImageElement extends MediaElement {
 
   public synchronized PlanarImage getImage(OpManager manager, boolean findMinMax) {
     try {
-      return getCacheImage(startImageLoading(), manager, findMinMax);
+      return getCacheImage(startImageLoading(), manager, findMinMax, true);
     } catch (OutOfMemoryError e1) {
       LOGGER.warn("Out of MemoryError: {}", this, e1);
 
       mCache.expungeStaleEntries();
       CvUtil.runGarbageCollectorAndWait(100);
 
-      return getCacheImage(startImageLoading(), manager, findMinMax);
+      return getCacheImage(startImageLoading(), manager, findMinMax, true);
     }
   }
 
-  private PlanarImage getCacheImage(PlanarImage cacheImage, OpManager manager, boolean findMinMax) {
+  private PlanarImage getCacheImage(
+      PlanarImage cacheImage, OpManager manager, boolean findMinMax, boolean reloadIfReleased) {
+    if (reloadIfReleased && isBufferReleased(cacheImage)) {
+      // The native buffer was released by a concurrent cache eviction. Returning it would give an
+      // image without pixels, so drop the stale entry and decode again, once.
+      LOGGER.warn("Image buffer released during concurrent access, reloading: {}", this);
+      mCache.remove(this);
+      return getCacheImage(startImageLoading(), manager, findMinMax, false);
+    }
     if (findMinMax) {
       try {
         findMinMaxValues(cacheImage, true);
       } catch (Exception e) {
         mCache.remove(this);
-        readable = false;
-        LOGGER.error("Cannot read image: {}", this, e);
+        if (isBufferReleased(cacheImage)) {
+          // Released while computing: keep the element readable so that the next access decodes
+          // it again instead of making it unreadable for good.
+          LOGGER.warn("Image buffer released during concurrent access: {}", this);
+        } else {
+          readable = false;
+          LOGGER.error("Cannot read image: {}", this, e);
+        }
       }
     }
     if (manager != null && cacheImage != null) {
@@ -400,6 +494,11 @@ public class ImageElement extends MediaElement {
       }
     }
     return cacheImage;
+  }
+
+  /** An image whose native buffer was released by a cache eviction has no dimension. */
+  private static boolean isBufferReleased(PlanarImage image) {
+    return image != null && image.width() <= 0;
   }
 
   public PlanarImage getImage() {
@@ -418,8 +517,8 @@ public class ImageElement extends MediaElement {
       } catch (InterruptedException e) {
         // Re-assert the thread's interrupted status
         Thread.currentThread().interrupt();
-        // We don't need the result, so cancel the task too
-        future.cancel(true);
+        // We don't need the result, so cancel the task too and remove it from the queue
+        cancelImageLoading(future);
       } catch (ExecutionException e) {
         if (e.getCause() instanceof OutOfMemoryError) {
           setAsLoaded();

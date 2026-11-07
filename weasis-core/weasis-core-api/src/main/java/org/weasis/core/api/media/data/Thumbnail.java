@@ -312,7 +312,7 @@ public class Thumbnail extends JLabel implements Thumbnailable {
         }
       } else {
         Load ref = new Load(file);
-        // loading images sequentially, only one thread pool
+        // decoded on the image loader pool, never on this thread
         Future<PlanarImage> future = ImageElement.IMAGE_LOADER.submit(ref);
         PlanarImage thumb = null;
         try {
@@ -332,8 +332,8 @@ public class Thumbnail extends JLabel implements Thumbnailable {
         } catch (InterruptedException e) {
           // Re-assert the thread's interrupted status
           Thread.currentThread().interrupt();
-          // We don't need the result, so cancel the task too
-          future.cancel(true);
+          // We don't need the result, so cancel the task too and remove it from the queue
+          ImageElement.cancelImageLoading(future);
         } catch (ExecutionException e) {
           LOGGER.error("Cannot read thumbnail pixel data!: {}", file, e);
         }

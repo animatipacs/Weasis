@@ -346,6 +346,45 @@ Scenario: a queued task is removed when its caller is interrupted
 **Complexity:** complex — changes the process-wide decode executor and the reader's reset semantics, a compatibility boundary for every image load, with lock and interrupt interactions
 **Run note:** spec §10 item 2 — record the green run after the change for every criterion, and whether the build accepted the evidence rule as written or asked for something else.
 
+**Gate record (2026-11-07):** first, AC-1, AC-4 and AC-5 were run again on the unchanged main code and failed as
+recorded in Increment 1. After the change, `mvn -B -pl weasis-core/weasis-core-api,weasis-dicom/weasis-dicom-codec
+-am -DskipTests package` exited 0, then `mvn -B -pl weasis-core/weasis-core-api,weasis-dicom/weasis-dicom-codec -am
+test` exited 0 three times in a row, in a foreground session on Windows x86-64 with JDK 17. Each run:
+`weasis-core-api` 34 tests and `weasis-dicom-codec` 13 tests, with no failure, error or skip. Increment 1's tests are
+unchanged. The build accepted the evidence rule as written: each `[guard]` criterion's evidence is a green run before
+the change (Increment 1) and the green runs after it. Each `[new behaviour]` criterion failed before the change and
+passes after it. Each new scenario was seen failing before its code was written.
+
+| AC / scenario | Tag | Test | Result after the change (3 runs) |
+|---|---|---|---|
+| AC-1 | `[new behaviour]` | `ImageLoaderPoolTest.twoElementsDecodeAtTheSameTime` | passed |
+| AC-2 | `[guard]` | `ImageLoaderSingleThreadTest.twoElementsNeverDecodeAtTheSameTime` | passed |
+| AC-3 | `[guard]` | `ImageLoaderPoolTest.eightCallersOfOneElementShareOneDecode` | passed |
+| AC-4 | `[new behaviour]` | `ConcurrentFrameDecodeTest`, JPEG 2000 lossless and JPEG baseline | passed: 50 of 50 repetitions, 400 of 400 frames identical to the serial decode, for each syntax |
+| AC-5 | `[new behaviour]` | `ReaderCloseDuringDecodeTest.closeDuringADecodeKeepsItsPixelsAndResetsTheReaderAfterIt` | passed |
+| AC-6 | `[guard]` | `ConcurrentSyntaxDecodeTest` (nine syntaxes, 8 threads × 20 rounds) | passed: 160 of 160 decodes pixel-identical for each syntax, decoded concurrently on the pool, Windows x86-64 |
+| AC-7 | `[guard]` | `ImageLoaderPoolTest.interruptedCallerReturnsAndALaterCallDecodes` | passed |
+| AC-8 | `[guard]` | `ImageLoaderSingleThreadTest.decodesNeverRunOnACallersThread` | passed |
+| AC-9 | — | — | not applicable (unbounded queue, Context *Decisions*) |
+| pool size | new | `ImageLoaderPoolSizeTest` (6 tests) | before its code: 5 of 6 failed, because the size was always 1; after: passed |
+| pool threads | new | `ImageLoaderThreadsTest.tasksRunOnDaemonThreadsNamedImageLoaderN` (property `3`) | before its code: failed, "3 tasks running at the same time within 5 s"; after: passed |
+| queued task removed | new | `ImageLoaderQueuedCancelTest.queuedTaskIsRemovedWhenItsCallerIsInterrupted` (property `1`) | before its code: failed, "tasks left in the queue after the interrupt expected 0 but was 1"; after: passed |
+| released buffer | new (FCR §2 item 5) | `ReleasedBufferTest` (2 tests) | before its code: both failed (1 decode instead of 2; element made unreadable); after: passed |
+| existing | — | `TagWTest` (9), `WPropertiesTest` (10), `TagDTest` (6), `DicomMediaUtilsTest` (3) | 28 passed |
+
+*Released-buffer guard (spec §8 Q4):* ported. Upstream `v4.7.2`'s `isBufferReleased(PlanarImage)` is
+`image != null && image.width() <= 0`, and `PlanarImage.width()` exists in `weasis-core-img` 4.5.3. A probe on this
+machine, with `weasis-core-img` 4.5.3 and the native library `4.5.3-dcm`, showed an `ImageCV` of 3×4 reporting
+`width=0 height=0` after `release()`. The guard decodes again, once, when the cache entry was evicted between the decode
+and the return. It keeps the element readable when the buffer is released while the minimum and maximum are computed.
+*Shutdown:* nothing in `weasis-core-api` or `weasis-dicom-codec` joins, shuts down or awaits `IMAGE_LOADER`; its only
+users are `ImageElement` and `Thumbnail`, which submit to it. The only `awaitTermination` / `shutdownNow` in the cited
+modules is `GuiExecutor`, which throws `UnsupportedOperationException` from them.
+*Deviation:* the in-flight count and the pending reset are guarded by a private lock of the reader, not by its
+monitor. `readMetaData()` holds the monitor during header I/O. Its `HEADER_CACHE.put` can reach another reader's
+`reset()` through the soft cache's removal callback, so a `reset()` on the monitor could deadlock two readers. With the
+private lock, `reset()` never waits for a header read. The fragment index is still built under the reader's monitor.
+
 ---
 
 ### - [ ] 3. Internal version (FCR §5 task 5) — hand-off to the release half

@@ -249,6 +249,17 @@ these notes before it asks for the release approval.** This section is scanned w
    clear the state the decode reads: dis=null, tsuid=null". The 28 existing tests passed. AC-9 does not apply
    (unbounded queue, item 1). The stop rule did not trigger. Each test's result is recorded in the plan's
    Increment 1, *Gate record*.
+   — After the change (FCR §5 task 4), 2026-11-07: the evidence rule was again accepted as written, with no other
+   evidence asked for. AC-1, AC-4 and AC-5 were first run again on the unchanged main code and failed as above.
+   With the change, `mvn -B -pl weasis-core/weasis-core-api,weasis-dicom/weasis-dicom-codec -am -DskipTests package`
+   exited 0. Then `mvn -B -pl weasis-core/weasis-core-api,weasis-dicom/weasis-dicom-codec -am test` passed three
+   times in a row, in a foreground session on Windows x86-64: every criterion from AC-1 to AC-8, with Increment 1's
+   tests unchanged. AC-4 decoded 400 of 400 frames identical to the serial decode for each syntax. AC-6 decoded
+   160 of 160 pixel-identical for each of the nine syntaxes, concurrently on the pool. The 28 existing tests also
+   passed, and so did the new tests of the pool size, the pool threads, the queued task removed on interrupt and the
+   released-buffer guard; each new test was seen failing before its code. FCR §2 item 5 applies on 3.8.x and is
+   ported: a released buffer reports `width() <= 0` on `weasis-core-img` 4.5.3. Each result is recorded in the
+   plan's Increment 2, *Gate record*.
 3. **The leak scan.** Whether the leak scan caught what the FCR's banner forbids: the probe's hit count, and each
    scanned file's count (the diff, the commit messages, each document under `docs/` and the context layer).
    — *to fill in*

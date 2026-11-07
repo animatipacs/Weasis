@@ -24,8 +24,10 @@ import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
@@ -284,7 +286,11 @@ public class DicomMediaIO implements DcmMediaReader {
   private final Map<TagW, Object> tags;
   private MediaElement[] image = null;
   private String mimeType;
-  private final ArrayList<Integer> fragmentsPositions = new ArrayList<>();
+  /**
+   * The first fragment of each frame, for multi-frame data with several fragments per frame; null
+   * until the first decode that needs it builds it, once per reader, then read without the lock.
+   */
+  private volatile List<Integer> fragmentsPositions;
 
   private ImageInputStream iis;
   private DicomInputStream dis;
@@ -302,7 +308,16 @@ public class DicomMediaIO implements DcmMediaReader {
   private boolean skipLargePrivate = true;
 
   private volatile boolean readingHeader = false;
-  private volatile boolean readingImage = false;
+
+  /**
+   * Guards {@link #decodesInFlight} and {@link #resetPending}. It is not the reader's monitor, so
+   * that a reset never waits for a header read, and it is never held while decoding.
+   */
+  private final Object decodeLock = new Object();
+  /** The decodes of this reader in progress: a reset meanwhile is deferred until none is left. */
+  private int decodesInFlight = 0;
+  /** A reset arrived while decodes were in progress; the last one to end runs it, once. */
+  private boolean resetPending = false;
 
   private final FileCache fileCache;
 
@@ -713,9 +728,29 @@ public class DicomMediaIO implements DcmMediaReader {
   @Override
   public PlanarImage getImageFragment(MediaElement media) throws Exception {
     if (Objects.requireNonNull(media).getKey() instanceof Integer) {
-      return getImageFragment(media, (Integer) media.getKey());
+      synchronized (decodeLock) {
+        decodesInFlight++;
+      }
+      try {
+        return getImageFragment(media, (Integer) media.getKey());
+      } finally {
+        endDecode();
+      }
     }
     return null;
+  }
+
+  /** Ends a decode counted by {@link #getImageFragment(MediaElement)}; runs a deferred reset. */
+  private void endDecode() {
+    synchronized (decodeLock) {
+      decodesInFlight--;
+      if (decodesInFlight == 0 && resetPending) {
+        resetPending = false;
+        if (!readingHeader) {
+          resetInternalState();
+        }
+      }
+    }
   }
 
   protected PlanarImage getImageFragment(MediaElement media, int frame) throws Exception {
@@ -1115,27 +1150,11 @@ public class DicomMediaIO implements DcmMediaReader {
           }
         } else {
           // Multi-frames where each frames can have multiple fragments.
-          if (fragmentsPositions.isEmpty()) {
-            boolean jpeg2000 = tsuid.startsWith("1.2.840.10008.1.2.4.9");
-            try (ImageInputStream srcStream = ImageIO.createImageInputStream(new File(uri))) {
-              for (int i = 1; i < nbFragments; i++) {
-                BulkData bulkData = (BulkData) pixeldataFragments.get(i);
-                ImageInputStream stream =
-                    new org.dcm4che3.imageio.stream.SegmentedInputImageStream(
-                        srcStream, bulkData.offset(), bulkData.length(), false);
-                if (jpeg2000 ? decodeJpeg2000(stream) : decodeJpeg(stream)) {
-                  fragmentsPositions.add(i);
-                }
-              }
-            }
-          }
-
-          if (fragmentsPositions.size() == numberOfFrame) {
-            int start = fragmentsPositions.get(frameIndex);
+          List<Integer> positions = getFragmentsPositions(nbFragments);
+          if (positions.size() == numberOfFrame) {
+            int start = positions.get(frameIndex);
             int end =
-                (frameIndex + 1) >= fragmentsPositions.size()
-                    ? nbFragments
-                    : fragmentsPositions.get(frameIndex + 1);
+                (frameIndex + 1) >= positions.size() ? nbFragments : positions.get(frameIndex + 1);
 
             offsets = new long[end - start];
             length = new int[offsets.length];
@@ -1152,6 +1171,38 @@ public class DicomMediaIO implements DcmMediaReader {
     }
     return new ExtendSegmentedInputImageStream(
         fileCache.getOriginalFile().orElse(null), offsets, length);
+  }
+
+  /**
+   * Returns the index of the first fragment of each frame, built by the first caller under the
+   * reader's lock in a local list and then published, so that concurrent decodes of frames of this
+   * reader never fill it together.
+   */
+  private List<Integer> getFragmentsPositions(int nbFragments) throws IOException {
+    List<Integer> positions = fragmentsPositions;
+    if (positions == null) {
+      synchronized (this) {
+        positions = fragmentsPositions;
+        if (positions == null) {
+          List<Integer> list = new ArrayList<>();
+          boolean jpeg2000 = tsuid.startsWith("1.2.840.10008.1.2.4.9");
+          try (ImageInputStream srcStream = ImageIO.createImageInputStream(new File(uri))) {
+            for (int i = 1; i < nbFragments; i++) {
+              BulkData bulkData = (BulkData) pixeldataFragments.get(i);
+              ImageInputStream stream =
+                  new org.dcm4che3.imageio.stream.SegmentedInputImageStream(
+                      srcStream, bulkData.offset(), bulkData.length(), false);
+              if (jpeg2000 ? decodeJpeg2000(stream) : decodeJpeg(stream)) {
+                list.add(i);
+              }
+            }
+          }
+          positions = Collections.unmodifiableList(list);
+          fragmentsPositions = positions;
+        }
+      }
+    }
+    return positions;
   }
 
   public boolean isSkipLargePrivate() {
@@ -1180,7 +1231,6 @@ public class DicomMediaIO implements DcmMediaReader {
   public void dispose() {
     HEADER_CACHE.remove(this);
     readingHeader = false;
-    readingImage = false;
     reset();
   }
 
@@ -1190,11 +1240,15 @@ public class DicomMediaIO implements DcmMediaReader {
      * readingHeader: prevent error when reading images from a large multiframe and the header is removed from the
      * cache at the same time.
      *
-     * readingImage: prevent closing stream when reading an image or for the RenderedImage which delays the image
-     * reading.
+     * Decodes in flight: prevent clearing the state a decode reads. The reset is deferred and run
+     * once, when the last decode in flight ends.
      */
-    if (!readingHeader && !readingImage) {
-      resetInternalState();
+    synchronized (decodeLock) {
+      if (decodesInFlight > 0) {
+        resetPending = true;
+      } else if (!readingHeader) {
+        resetInternalState();
+      }
     }
   }
 
