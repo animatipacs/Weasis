@@ -1,0 +1,164 @@
+/*
+ * Copyright (c) 2009-2020 Weasis Team and other contributors.
+ *
+ * This program and the accompanying materials are made available under the terms of the Eclipse
+ * Public License 2.0 which is available at https://www.eclipse.org/legal/epl-2.0, or the Apache
+ * License, Version 2.0 which is available at https://www.apache.org/licenses/LICENSE-2.0.
+ *
+ * SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+ */
+package org.weasis.dicom.codec;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.io.File;
+import java.lang.reflect.Field;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.BeforeClass;
+import org.junit.ClassRule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+import org.weasis.core.api.media.data.MediaElement;
+import org.weasis.dicom.codec.SyntheticDicomFiles.Syntax;
+import org.weasis.opencv.data.PlanarImage;
+
+/**
+ * FCR §3 criterion 5 ({@code [new behaviour]}): with one frame of a multi-frame reader being
+ * decoded, {@code close()} called on the same reader from another thread does not disturb the
+ * decode, and once the decode has ended the reset has run: the reader's stream is closed and its
+ * parse state ({@code iis}, {@code dis}, {@code tsuid}) is cleared, as after a {@code close()} with
+ * no decode in flight. The private fields are read by reflection; the reader gains no accessor.
+ */
+public class ReaderCloseDuringDecodeTest {
+
+  private static final int ROWS = 64;
+  private static final int COLUMNS = 64;
+  private static final int FRAMES = 8;
+  private static final int FRAME = 3;
+
+  @ClassRule public static final TemporaryFolder FOLDER = new TemporaryFolder();
+
+  private static File file;
+
+  @BeforeClass
+  public static void prepare() throws Exception {
+    CodecTestEnvironment.prepare();
+    file =
+        SyntheticDicomFiles.write(
+            FOLDER.newFile("multiframe.dcm"), Syntax.JPEG_2000_LOSSLESS, ROWS, COLUMNS, FRAMES, 3);
+  }
+
+  /**
+   * A reader whose protected decode signals that it started, then waits for the test before it
+   * decodes. The public {@code getImageFragment(MediaElement)} calls it, so the wait is inside the
+   * decode as the reader sees it.
+   */
+  static class GatedDicomMediaIO extends DicomMediaIO {
+    final CountDownLatch started = new CountDownLatch(1);
+    final CountDownLatch release = new CountDownLatch(1);
+
+    GatedDicomMediaIO(File source) {
+      super(source);
+    }
+
+    @Override
+    protected PlanarImage getImageFragment(MediaElement media, int frame) throws Exception {
+      started.countDown();
+      if (!release.await(30, TimeUnit.SECONDS)) {
+        throw new IllegalStateException("The test did not release the decode within 30 s");
+      }
+      return super.getImageFragment(media, frame);
+    }
+  }
+
+  @Test
+  public void closeDuringADecodeKeepsItsPixelsAndResetsTheReaderAfterIt() throws Exception {
+    byte[] undisturbed = undisturbedDecodeOfFrame();
+
+    GatedDicomMediaIO reader = new GatedDicomMediaIO(file);
+    MediaElement[] elements = reader.getMediaElement();
+    assertThat(elements).hasSize(FRAMES);
+
+    AtomicReference<byte[]> decoded = new AtomicReference<>();
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread decoder =
+        new Thread(
+            () -> {
+              try {
+                PlanarImage img = reader.getImageFragment(elements[FRAME]);
+                try {
+                  decoded.set(SyntheticDicomFiles.bytesOf(img));
+                } finally {
+                  if (img != null) {
+                    img.release();
+                  }
+                }
+              } catch (Throwable e) {
+                failure.set(e);
+              }
+            },
+            "frame-decoder");
+    Thread closer = new Thread(reader::close, "reader-closer");
+    try {
+      decoder.start();
+      assertThat(reader.started.await(10, TimeUnit.SECONDS))
+          .as("the decode of frame %d started", FRAME)
+          .isTrue();
+      closer.start();
+      closer.join(TimeUnit.SECONDS.toMillis(10));
+      assertThat(closer.isAlive()).as("close() returned within 10 s").isFalse();
+    } finally {
+      reader.release.countDown();
+      decoder.join(TimeUnit.SECONDS.toMillis(30));
+    }
+    assertThat(decoder.isAlive()).as("the decode ended within 30 s").isFalse();
+
+    assertThat(failure.get()).as("failure of the decode during close()").isNull();
+    assertThat(decoded.get())
+        .as("frame %d decoded while close() ran equals an undisturbed decode", FRAME)
+        .isEqualTo(undisturbed);
+
+    Object iis = field(reader, "iis");
+    Object dis = field(reader, "dis");
+    Object tsuid = field(reader, "tsuid");
+    assertThat(new Object[] {iis, dis, tsuid})
+        .as(
+            "after the decode ended, the reset of the close() called during it has run, as after a"
+                + " close() with no decode in flight: iis=%s, dis=%s, tsuid=%s",
+            iis,
+            dis,
+            tsuid)
+        .containsOnlyNulls();
+  }
+
+  /**
+   * The undisturbed decode of the frame, through a plain reader that is then closed with no decode
+   * in flight: the reference for the pixels and for the state a close() leaves.
+   */
+  private static byte[] undisturbedDecodeOfFrame() throws Exception {
+    DicomMediaIO reader = new DicomMediaIO(file);
+    byte[] pixels;
+    PlanarImage img = reader.getImageFragment(reader.getMediaElement()[FRAME]);
+    try {
+      pixels = SyntheticDicomFiles.bytesOf(img);
+    } finally {
+      img.release();
+    }
+    reader.close();
+    assertThat(pixels)
+        .as("undisturbed decode of frame %d", FRAME)
+        .isEqualTo(SyntheticDicomFiles.pixels(ROWS, COLUMNS, FRAME));
+    assertThat(new Object[] {field(reader, "iis"), field(reader, "dis"), field(reader, "tsuid")})
+        .as("iis, dis and tsuid after a close() with no decode in flight")
+        .containsOnlyNulls();
+    return pixels;
+  }
+
+  private static Object field(DicomMediaIO reader, String name) throws Exception {
+    Field field = DicomMediaIO.class.getDeclaredField(name);
+    field.setAccessible(true);
+    return field.get(reader);
+  }
+}

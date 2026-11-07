@@ -43,6 +43,14 @@
           </bnd>
         </configuration>
       </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!-- One JVM per test class: ImageElement.IMAGE_LOADER reads its pool size once per JVM -->
+          <reuseForks>false</reuseForks>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
 
