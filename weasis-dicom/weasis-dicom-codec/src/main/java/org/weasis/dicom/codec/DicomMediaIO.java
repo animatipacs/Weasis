@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.imageio.ImageIO;
 import javax.imageio.stream.ImageInputStream;
@@ -256,16 +257,63 @@ public class DicomMediaIO implements DcmMediaReader {
         });
   }
 
+  /**
+   * The headers of all readers, shared by decodes on the image loader threads and by the closes of
+   * the image cache's evictions. Every method that reads or changes the maps holds this cache's
+   * monitor. Lock order: a reader's monitor, or the image cache's map, before this monitor, and
+   * this monitor before a reader's {@link #decodeLock}, which {@link #reset()} of an evicted reader
+   * takes here; nothing under this monitor takes any other lock.
+   */
   private static final SoftHashMap<DicomMediaIO, DicomMetaData> HEADER_CACHE =
       new SoftHashMap<DicomMediaIO, DicomMetaData>() {
 
         @Override
-        public void removeElement(Reference<? extends DicomMetaData> soft) {
+        public synchronized DicomMetaData get(Object key) {
+          return super.get(key);
+        }
+
+        @Override
+        public synchronized DicomMetaData put(DicomMediaIO key, DicomMetaData value) {
+          return super.put(key, value);
+        }
+
+        @Override
+        public synchronized DicomMetaData remove(Object key) {
+          return super.remove(key);
+        }
+
+        @Override
+        public synchronized void removeElement(Reference<? extends DicomMetaData> soft) {
           DicomMediaIO key = reverseLookup.remove(soft);
           if (key != null) {
             hash.remove(key);
             key.reset();
           }
+        }
+
+        @Override
+        public synchronized void expungeStaleEntries() {
+          super.expungeStaleEntries();
+        }
+
+        @Override
+        public synchronized void clear() {
+          super.clear();
+        }
+
+        @Override
+        public synchronized int size() {
+          return super.size();
+        }
+
+        @Override
+        public synchronized Set<Entry<DicomMediaIO, DicomMetaData>> entrySet() {
+          return super.entrySet();
+        }
+
+        @Override
+        public synchronized boolean containsKey(Object key) {
+          return super.containsKey(key);
         }
       };
 
@@ -1189,8 +1237,7 @@ public class DicomMediaIO implements DcmMediaReader {
    * reader never fill it together. {@code syntax} is the transfer syntax the decode read with the
    * header.
    */
-  private List<Integer> getFragmentsPositions(int nbFragments, String syntax)
-      throws IOException {
+  private List<Integer> getFragmentsPositions(int nbFragments, String syntax) throws IOException {
     List<Integer> positions = fragmentsPositions;
     if (positions == null) {
       synchronized (this) {
@@ -1257,7 +1304,8 @@ public class DicomMediaIO implements DcmMediaReader {
    * Removes the header from {@link #HEADER_CACHE}, then resets the reader unless a decode started
    * meanwhile, in which case the last decode to end does both again. Called without {@link
    * #decodeLock}: the cache's removal callback runs {@link #reset()} of other readers, so calling
-   * the cache under this lock would nest the locks of two readers.
+   * the cache under this lock would nest the locks of two readers and take the cache's monitor
+   * after a {@link #decodeLock}, against the lock order given at {@link #HEADER_CACHE}.
    */
   private void removeHeaderAndReset() {
     HEADER_CACHE.remove(this);
@@ -1305,13 +1353,27 @@ public class DicomMediaIO implements DcmMediaReader {
   }
 
   /**
-   * Reads the header, if it is not cached, and returns the transfer syntax read with it, both under
-   * the reader's lock. A header read clears the transfer syntax and sets it again under that lock,
-   * so a decode never sees it cleared by the header read of another decode of this reader.
+   * Reads the header, if it is not cached, and returns the transfer syntax of the pixel data read
+   * with that header, null when it has none. It is taken from the header and not from {@link
+   * #tsuid}, which a reset clears while the header can stay cached: a reset deferred by a decode
+   * runs when the decode ends, after the decode may have read the header again and cached it.
    */
-  private synchronized String readTransferSyntax() throws IOException {
-    readMetaData();
-    return tsuid;
+  private String readTransferSyntax() throws IOException {
+    DicomMetaData header = readMetaData();
+    return header instanceof FileHeader ? ((FileHeader) header).transferSyntax : null;
+  }
+
+  /**
+   * A header read from the file, with the transfer syntax of its pixel data as the header read
+   * found it ({@link #tsuid} at the end of that read).
+   */
+  private static final class FileHeader extends DicomMetaData {
+    private final String transferSyntax;
+
+    FileHeader(Attributes fmi, Attributes ds, String transferSyntax) {
+      super(fmi, ds);
+      this.transferSyntax = transferSyntax;
+    }
   }
 
   /**
@@ -1352,7 +1414,6 @@ public class DicomMediaIO implements DcmMediaReader {
       if (fmi == null) {
         fmi = ds.createFileMetaInformation(dis.getTransferSyntax());
       }
-      DicomMetaData metadata = new DicomMetaData(fmi, ds);
       Object pixdata = ds.getValue(Tag.PixelData, pixeldataVR);
       if (pixdata == null) {
         pixdata = ds.getValue(Tag.FloatPixelData, pixeldataVR);
@@ -1396,6 +1457,7 @@ public class DicomMediaIO implements DcmMediaReader {
         }
       }
 
+      DicomMetaData metadata = new FileHeader(fmi, ds, tsuid);
       HEADER_CACHE.put(this, metadata);
       return metadata;
     } finally {

@@ -12,6 +12,7 @@ package org.weasis.dicom.codec;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.File;
+import java.lang.ref.Reference;
 import java.lang.reflect.Field;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -23,6 +24,7 @@ import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.weasis.core.api.media.data.MediaElement;
+import org.weasis.core.api.media.data.SoftHashMap;
 import org.weasis.dicom.codec.SyntheticDicomFiles.Syntax;
 import org.weasis.opencv.data.PlanarImage;
 
@@ -44,6 +46,10 @@ import org.weasis.opencv.data.PlanarImage;
  * <p>A second scenario, on a multi-frame RLE lossless reader, checks what that reset leaves behind:
  * the reader's header is no longer in the header cache, as after a {@code close()} with no decode
  * in flight, and a decode of another frame on the same reader equals its undisturbed decode.
+ *
+ * <p>A third scenario, on the same kind of reader, has the header cache evict the reader's header
+ * during a decode instead: the reset that the cache's removal callback calls is deferred, and a
+ * decode of another frame on the same reader afterwards equals its undisturbed decode.
  */
 public class ReaderCloseDuringDecodeTest {
 
@@ -231,6 +237,99 @@ public class ReaderCloseDuringDecodeTest {
                 + " ended, unlike after a close() with no decode in flight")
         .isFalse();
     softly.assertAll();
+  }
+
+  /**
+   * The header cache evicts the header of a multi-frame RLE lossless reader during a decode: its
+   * removal callback, called with the cleared reference, removes the entry and calls {@code
+   * reset()}, which the decode in flight defers. Released, the decode reads the header again and
+   * the cache keeps it; the deferred reset runs when the decode ends. A decode of another frame on
+   * the same reader afterwards equals its undisturbed decode: it decodes with the transfer syntax
+   * of the header it reads, whatever the reset cleared.
+   */
+  @Test
+  public void headerEvictedDuringADecodeLeavesTheReaderReadyToDecodeAnotherFrame()
+      throws Exception {
+    File rle =
+        SyntheticDicomFiles.write(
+            FOLDER.newFile("multiframe-rle-evicted.dcm"),
+            Syntax.RLE_LOSSLESS,
+            ROWS,
+            COLUMNS,
+            FRAMES,
+            1);
+    int nextFrame = FRAME + 1;
+    byte[] undisturbedNext = undisturbedDecodeOfFrame(rle, nextFrame);
+
+    GatedDicomMediaIO reader = new GatedDicomMediaIO(rle);
+    MediaElement[] elements = reader.getMediaElement();
+    assertThat(elements).hasSize(FRAMES);
+
+    AtomicReference<byte[]> decoded = new AtomicReference<>();
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread decoder =
+        new Thread(
+            () -> {
+              try {
+                decoded.set(decode(reader, elements[FRAME]));
+              } catch (Throwable e) {
+                failure.set(e);
+              }
+            },
+            "evicted-rle-frame-decoder");
+    try {
+      decoder.start();
+      assertThat(reader.started.await(10, TimeUnit.SECONDS))
+          .as("the decode of RLE frame %d started", FRAME)
+          .isTrue();
+      evictHeader(reader);
+    } finally {
+      reader.release.countDown();
+      decoder.join(TimeUnit.SECONDS.toMillis(30));
+    }
+    assertThat(decoder.isAlive()).as("the decode ended within 30 s").isFalse();
+    assertThat(failure.get()).as("failure of the decode during the eviction").isNull();
+    assertThat(decoded.get())
+        .as("RLE frame %d decoded while its header was evicted equals an undisturbed decode", FRAME)
+        .isEqualTo(SyntheticDicomFiles.pixels(ROWS, COLUMNS, FRAME));
+
+    boolean headerCachedAfter = headerCache().containsKey(reader);
+    Object tsuidAfter = field(reader, "tsuid");
+    byte[] next = null;
+    Throwable nextFailure = null;
+    try {
+      next = decode(reader, elements[nextFrame]);
+    } catch (Exception e) {
+      nextFailure = e;
+    }
+    assertThat(nextFailure)
+        .as(
+            "failure of the decode of RLE frame %d on the same reader after the eviction (header"
+                + " cached=%s, tsuid=%s then)",
+            nextFrame, headerCachedAfter, tsuidAfter)
+        .isNull();
+    assertThat(next)
+        .as(
+            "RLE frame %d decoded on the same reader after the decode held during the eviction"
+                + " ended (header cached=%s, tsuid=%s then) equals its undisturbed decode",
+            nextFrame, headerCachedAfter, tsuidAfter)
+        .isEqualTo(undisturbedNext);
+  }
+
+  /**
+   * What the header cache does when the soft reference to the reader's header is cleared: its
+   * removal callback, called with that reference, removes the entry and resets the reader.
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private static void evictHeader(DicomMediaIO reader) throws Exception {
+    SoftHashMap cache = (SoftHashMap) headerCache();
+    Field hash = SoftHashMap.class.getDeclaredField("hash");
+    hash.setAccessible(true);
+    synchronized (cache) {
+      Reference<?> reference = (Reference<?>) ((Map<?, ?>) hash.get(cache)).get(reader);
+      assertThat(reference).as("the reader's header in the header cache").isNotNull();
+      cache.removeElement(reference);
+    }
   }
 
   private static byte[] decode(DicomMediaIO reader, MediaElement element) throws Exception {

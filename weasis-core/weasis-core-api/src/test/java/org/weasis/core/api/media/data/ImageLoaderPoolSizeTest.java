@@ -70,4 +70,18 @@ public class ImageLoaderPoolSizeTest {
     assertThat(size(null, 1, 150)).isEqualTo(2);
     assertThat(warnings).as("warnings").isEmpty();
   }
+
+  @Test
+  public void heapBoundsTheSize() {
+    // max(2, min(min(16, 600 / 100), 2 x 8)) = 6
+    assertThat(size(null, 8, 600)).isEqualTo(6);
+    assertThat(warnings).as("warnings").isEmpty();
+  }
+
+  @Test
+  public void processorsBoundTheSize() {
+    // max(2, min(min(16, 4096 / 100), 2 x 2)) = 4
+    assertThat(size(null, 2, 4096)).isEqualTo(4);
+    assertThat(warnings).as("warnings").isEmpty();
+  }
 }
