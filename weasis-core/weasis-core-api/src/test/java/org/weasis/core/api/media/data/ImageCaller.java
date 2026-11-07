@@ -9,6 +9,10 @@
  */
 package org.weasis.core.api.media.data;
 
+import java.lang.management.LockInfo;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.util.Collection;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
@@ -19,6 +23,8 @@ import org.weasis.opencv.data.PlanarImage;
  * returned: the image, its interrupt status and whether the fake reader's latch was open.
  */
 final class ImageCaller {
+
+  private static final ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
 
   final Thread thread;
   private final ImageElement element;
@@ -67,6 +73,34 @@ final class ImageCaller {
   boolean join(long timeout, TimeUnit unit) throws InterruptedException {
     thread.join(Math.max(1, unit.toMillis(timeout)));
     return !thread.isAlive();
+  }
+
+  /**
+   * The caller thread's state, the lock it waits for and that lock's owner; null once the thread
+   * has ended.
+   */
+  ThreadInfo threadInfo() {
+    return THREADS.getThreadInfo(thread.getId());
+  }
+
+  /** Each caller's thread state and the lock it waits for, for a failure message. */
+  static String describe(Collection<ImageCaller> callers) {
+    StringBuilder text = new StringBuilder();
+    for (ImageCaller caller : callers) {
+      ThreadInfo info = caller.threadInfo();
+      text.append(caller.thread.getName()).append('=');
+      if (info == null) {
+        text.append("ended");
+      } else {
+        text.append(info.getThreadState());
+        LockInfo lock = info.getLockInfo();
+        if (lock != null) {
+          text.append(" on ").append(lock);
+        }
+      }
+      text.append("; ");
+    }
+    return text.toString();
   }
 
   /** Joins every caller, each with the timeout; returns how many are still running. */

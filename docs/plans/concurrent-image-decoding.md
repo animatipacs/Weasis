@@ -242,6 +242,28 @@ Scenario: AC-6 each syntax from 8 threads, own element and reader
 **Complexity:** complex — deterministic concurrency fixtures that must fail for the right reason, a static pool read once per JVM, native library loading in a test JVM for the first time, and generated multi-fragment fixtures
 **Run note:** spec §10 item 2 — record that the `[guard]` criteria's evidence is this green run on the unchanged code at `389f939` (then again in Increment 2), not a RED run; list each criterion's result here.
 
+**Gate record (2026-11-07):** `mvn -B -pl weasis-core/weasis-core-api,weasis-dicom/weasis-dicom-codec -am test
+-Dmaven.test.failure.ignore=true` with the main code unchanged at `389f939` (no change under `src/main`, no POM
+version), the tests as committed with this record, Windows x86-64, JDK 17. `weasis-core-api`: 24 tests, 1 failure;
+`weasis-dicom-codec`: 13 tests, 3 failures; the build itself succeeded (`-DskipTests package` exit 0). The stop rule
+did not trigger: every `[new behaviour]` criterion failed for the reason FCR §2 *Failing fixtures* names, and every
+`[guard]` criterion passed. Before the latch opens, AC-3 now asserts that seven callers are `BLOCKED` on the element's
+monitor held by the eighth, and AC-8 that all 32 callers are `WAITING` behind the one held decode. AC-5 now asserts
+that `dis` and `tsuid` are still set after a `close()` that returned while the decode was held.
+
+| AC | Tag | Test | Result on the unchanged code |
+|---|---|---|---|
+| AC-1 | `[new behaviour]` | `ImageLoaderPoolTest.twoElementsDecodeAtTheSameTime` | **failed**: "both getImageFragment() calls in progress at the same time within 5 s: the in-progress count stayed at 1 for 5 s" |
+| AC-2 | `[guard]` | `ImageLoaderSingleThreadTest.twoElementsNeverDecodeAtTheSameTime` | passed |
+| AC-3 | `[guard]` | `ImageLoaderPoolTest.eightCallersOfOneElementShareOneDecode` | passed |
+| AC-4 | `[new behaviour]` | `ConcurrentFrameDecodeTest`, JPEG 2000 lossless and JPEG baseline | **both failed**: 50 of 50 repetitions failed, "Cannot match all the fragments to all the frames!" 394 of 400 frames (JPEG 2000 lossless) and 400 of 400 (JPEG baseline) |
+| AC-5 | `[new behaviour]` | `ReaderCloseDuringDecodeTest.closeDuringADecodeKeepsItsPixelsAndResetsTheReaderAfterIt` | **failed**: "close() returned while the decode of frame 3 was held and did not clear the state the decode reads: dis=null, tsuid=null" |
+| AC-6 | `[guard]` | `ConcurrentSyntaxDecodeTest` (nine syntaxes, 8 threads × 20 rounds) | passed (serialized by the single thread) |
+| AC-7 | `[guard]` | `ImageLoaderPoolTest.interruptedCallerReturnsAndALaterCallDecodes` | passed |
+| AC-8 | `[guard]` | `ImageLoaderSingleThreadTest.decodesNeverRunOnACallersThread` | passed |
+| AC-9 | — | — | not applicable (unbounded queue, Context *Decisions*) |
+| existing | — | `TagWTest` (9), `WPropertiesTest` (10), `TagDTest` (6), `DicomMediaUtilsTest` (3) | 28 passed |
+
 ---
 
 ### - [ ] 2. Concurrent decoding (FCR §5 task 4) — the pool and its property, queue removal on cancel, a reader safe for concurrent decodes, the released-buffer decision

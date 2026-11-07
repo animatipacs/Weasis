@@ -11,6 +11,8 @@ package org.weasis.core.api.media.data;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.lang.management.LockInfo;
+import java.lang.management.ThreadInfo;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -77,7 +79,7 @@ public class ImageLoaderPoolTest {
       assertThat(gate.awaitFirstStarted(JOIN_SECONDS, TimeUnit.SECONDS))
           .as("the first getImageFragment() started")
           .isTrue();
-      awaitNoneRunnable(callers, 5, TimeUnit.SECONDS);
+      assertSevenCallersBlockedOnTheElement(element, callers, gate, 5, TimeUnit.SECONDS);
     } finally {
       gate.open();
       assertThat(ImageCaller.joinAll(callers, JOIN_SECONDS, TimeUnit.SECONDS))
@@ -134,22 +136,65 @@ public class ImageLoaderPoolTest {
         name, new ImageElement(new BlockingFakeReader(gate, new FakePlanarImage()), 0), gate);
   }
 
-  /** Bounded wait until no caller is runnable (each waits for the decode or for the element). */
-  private static void awaitNoneRunnable(List<ImageCaller> callers, long timeout, TimeUnit unit)
+  /**
+   * Waits, bounded, until the contention of criterion 3 is in place before the latch opens, and
+   * fails if it is not: the one decode is in progress, one caller waits for it inside {@code
+   * getImage(OpManager, boolean)} holding the element's monitor (the method is {@code
+   * synchronized}), and the seven others are {@code BLOCKED} on that monitor, owned by that caller.
+   * Callers still in the start barrier, or already returned, do not satisfy it.
+   */
+  private static void assertSevenCallersBlockedOnTheElement(
+      ImageElement element,
+      List<ImageCaller> callers,
+      BlockingFakeReader.Gate gate,
+      long timeout,
+      TimeUnit unit)
       throws InterruptedException {
+    int monitor = System.identityHashCode(element);
     long deadline = System.nanoTime() + unit.toNanos(timeout);
-    while (System.nanoTime() < deadline) {
-      boolean anyRunnable = false;
+    boolean inPlace = false;
+    while (!inPlace && System.nanoTime() < deadline) {
+      int blocked = 0;
+      int waiting = 0;
+      long waitingId = -1;
+      List<Long> owners = new ArrayList<>();
       for (ImageCaller caller : callers) {
-        if (caller.thread.getState() == Thread.State.RUNNABLE) {
-          anyRunnable = true;
-          break;
+        ThreadInfo info = caller.threadInfo();
+        if (info == null) {
+          continue;
+        }
+        LockInfo lock = info.getLockInfo();
+        if (info.getThreadState() == Thread.State.BLOCKED
+            && lock != null
+            && lock.getIdentityHashCode() == monitor) {
+          blocked++;
+          owners.add(info.getLockOwnerId());
+        } else if (info.getThreadState() == Thread.State.WAITING) {
+          waiting++;
+          waitingId = info.getThreadId();
         }
       }
-      if (!anyRunnable) {
-        return;
+      final long holder = waitingId;
+      inPlace =
+          blocked == 7
+              && waiting == 1
+              && owners.stream().allMatch(owner -> owner == holder)
+              && gate.calls() == 1
+              && gate.inProgress() == 1;
+      if (!inPlace) {
+        Thread.sleep(10);
       }
-      Thread.sleep(10);
     }
+    assertThat(inPlace)
+        .as(
+            "within %d %s, with the one getImageFragment() in progress (calls=%d, in progress=%d),"
+                + " seven callers BLOCKED on the element's monitor held by the eighth caller"
+                + " waiting for the decode; callers: %s",
+            timeout,
+            unit,
+            gate.calls(),
+            gate.inProgress(),
+            ImageCaller.describe(callers))
+        .isTrue();
   }
 }

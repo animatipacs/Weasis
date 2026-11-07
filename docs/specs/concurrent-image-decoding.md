@@ -239,7 +239,16 @@ these notes before it asks for the release approval.** This section is scanned w
 2. **The build and the evidence rule.** Whether the build accepted the evidence rule for the `[guard]` criteria —
    a green run on the unchanged code at the selected commit and again after the change, never a RED run — or
    what it asked for instead.
-   — *to fill in*
+   — Accepted as written on 2026-11-07: no other evidence was asked for. FCR §5 task 3 ran on the unchanged
+   main code at `389f939` (no change under `src/main`), with
+   `mvn -B -pl weasis-core/weasis-core-api,weasis-dicom/weasis-dicom-codec -am test`. The `[guard]` criteria's
+   evidence is that green run: AC-2, AC-3, AC-6, AC-7 and AC-8 passed; Increment 2 runs them again after the
+   change. AC-1, AC-4 and AC-5 failed for the reasons FCR §2 *Failing fixtures* names: AC-1 "the in-progress
+   count stayed at 1 for 5 s"; AC-4 `Cannot match all the fragments to all the frames!` in every repetition, for
+   JPEG 2000 lossless and JPEG baseline; AC-5 "close() returned while the decode of frame 3 was held and did not
+   clear the state the decode reads: dis=null, tsuid=null". The 28 existing tests passed. AC-9 does not apply
+   (unbounded queue, item 1). The stop rule did not trigger. Each test's result is recorded in the plan's
+   Increment 1, *Gate record*.
 3. **The leak scan.** Whether the leak scan caught what the FCR's banner forbids: the probe's hit count, and each
    scanned file's count (the diff, the commit messages, each document under `docs/` and the context layer).
    — *to fill in*

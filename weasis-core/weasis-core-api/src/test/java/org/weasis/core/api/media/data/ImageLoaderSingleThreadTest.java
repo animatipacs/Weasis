@@ -11,6 +11,7 @@ package org.weasis.core.api.media.data;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.lang.management.ThreadInfo;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -76,6 +77,7 @@ public class ImageLoaderSingleThreadTest {
       assertThat(gate.awaitFirstStarted(10, TimeUnit.SECONDS))
           .as("the first getImageFragment() started")
           .isTrue();
+      assertAllCallersWaitBehindTheHeldWorker(callers, gate, 10, TimeUnit.SECONDS);
     } finally {
       gate.open();
       assertThat(ImageCaller.joinAll(callers, JOIN_SECONDS, TimeUnit.SECONDS))
@@ -97,6 +99,44 @@ public class ImageLoaderSingleThreadTest {
           .doesNotContain(decodeThread);
       assertThat(decodeThread.getName()).as("decode thread name").startsWith("Image Loader");
     }
+  }
+
+  /**
+   * Waits, bounded, until the backlog of criterion 8 is in place before the latch opens, and fails
+   * if it is not: the single worker is held in the one decode started so far, and every caller is
+   * {@code WAITING} for its result, one for the held decode and the others for decodes not yet
+   * started. A caller that ran a decode on its own thread would start a second one, so the backlog
+   * would never be in place.
+   */
+  private static void assertAllCallersWaitBehindTheHeldWorker(
+      List<ImageCaller> callers, BlockingFakeReader.Gate gate, long timeout, TimeUnit unit)
+      throws InterruptedException {
+    long deadline = System.nanoTime() + unit.toNanos(timeout);
+    boolean inPlace = false;
+    while (!inPlace && System.nanoTime() < deadline) {
+      int waiting = 0;
+      for (ImageCaller caller : callers) {
+        ThreadInfo info = caller.threadInfo();
+        if (info != null && info.getThreadState() == Thread.State.WAITING) {
+          waiting++;
+        }
+      }
+      inPlace = waiting == callers.size() && gate.calls() == 1 && gate.inProgress() == 1;
+      if (!inPlace) {
+        Thread.sleep(10);
+      }
+    }
+    assertThat(inPlace)
+        .as(
+            "within %d %s, all %d callers WAITING while the worker is held in the one"
+                + " getImageFragment() call (calls=%d, in progress=%d); callers: %s",
+            timeout,
+            unit,
+            callers.size(),
+            gate.calls(),
+            gate.inProgress(),
+            ImageCaller.describe(callers))
+        .isTrue();
   }
 
   private static ImageCaller caller(String name, BlockingFakeReader.Gate gate) {
