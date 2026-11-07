@@ -227,7 +227,15 @@ these notes before it asks for the release approval.** This section is scanned w
 
 1. **The plan.** Whether the planner accepted this spec and the context layer (`architecture.md`, `CLAUDE.md`) as
    written, or what it asked to change.
-   — *to fill in*
+   — Accepted as written on 2026-11-07: no change to this spec, `architecture.md` or `CLAUDE.md`. The plan
+   (`docs/plans/concurrent-image-decoding.md`, approved 2026-11-07) follows FCR §5 tasks 3–6 in order. Tasks 3 and 4
+   are built. Task 5 is a hand-off to the release half, because `CLAUDE.md` rule 6 keeps POM versions off the
+   change branch. Task 6 is one increment per machine (Windows x86-64; Linux x86-64; macOS x86-64 through Rosetta 2
+   on Apple Silicon), plus exceptions recorded by the release approver for Windows x86, Linux x86, armv7a and
+   aarch64. The developer's decisions close §8 Q2 and Q3: an unbounded queue, so AC-9 does not apply; the pool size
+   from upstream `v4.6.3`'s formula, overridden by `weasis.image.loader.threads`. A planning note: AC-4 and AC-5 call
+   the reader directly, not through `IMAGE_LOADER`, so that they fail on the unchanged code as FCR §2 *Failing
+   fixtures* says.
 2. **The build and the evidence rule.** Whether the build accepted the evidence rule for the `[guard]` criteria —
    a green run on the unchanged code at the selected commit and again after the change, never a RED run — or
    what it asked for instead.
