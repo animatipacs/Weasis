@@ -135,7 +135,7 @@ caller thread ──getImage()──▶ startImageLoading() ──submit(Load)�
 filled by Increments 1 and 2. Item 4 (the platform checks) is filled by Increments 4–7. Item 3 (the leak scan) is
 FCR §5 task 7, the release half's. Each increment's **Run note:** says which item it writes, in Weasis terms only.
 
-### - [ ] 1. Acceptance tests first (FCR §5 task 3) — write AC-1 to AC-8 and run them on the unchanged code under the stop rule
+### - [x] 1. Acceptance tests first (FCR §5 task 3) — write AC-1 to AC-8 and run them on the unchanged code under the stop rule
 
 **Covers:** AC-1, AC-2, AC-3, AC-4, AC-5, AC-6, AC-7, AC-8 (AC-9 not applicable)
 **Why a test-only increment:** FCR §5 makes task 3 a gate with its own recorded result before task 4 starts, and
@@ -263,6 +263,19 @@ that `dis` and `tsuid` are still set after a `close()` that returned while the d
 | AC-8 | `[guard]` | `ImageLoaderSingleThreadTest.decodesNeverRunOnACallersThread` | passed |
 | AC-9 | — | — | not applicable (unbounded queue, Context *Decisions*) |
 | existing | — | `TagWTest` (9), `WPropertiesTest` (10), `TagDTest` (6), `DicomMediaUtilsTest` (3) | 28 passed |
+
+**Build record (2026-11-07):** commits `19c571cf4` (tests) and `5af657b70` (review repair: asserted contention in
+AC-3 and AC-8, AC-5 checked during the decode, this gate record). Effort: high, as routed. Inline review: spec
+**Pass** (one plan-deviation warning — the missing gate record — repaired); code quality **Approved** (Minor only:
+formatter drift because Spotless cannot run on JDK 17, readers not closed on failure paths, a best-effort wait helper,
+nits); test quality **Changes Requested** → repair iteration 1 → **Approved** (Minor: AC-8 counts any `WAITING`
+caller, not only one parked on a `FutureTask`). Open advisories carried to the final gate: AC-6 uses 64×64 frames;
+the Gherkin comment of AC-5 above and Risks still place AC-5's red at the post-decode check, while the test now fails
+first at the during-decode check. Coverage delta: unavailable — no coverage tool is configured in the cited modules.
+Deviations: Linux and macOS native profiles copy artifactId `libopencv_java` (the name the `weasis-opencv` modules
+use); extra test helpers `ImageCaller`, `CodecTestEnvironment`, `SyntheticDicomFiles`; `BundleTools` needed
+`weasis.pref.dir` and `weasis.resources.path` as system properties (no PowerMock); the full test run is red by design
+in this increment, so it was run with `-Dmaven.test.failure.ignore=true` to see both modules.
 
 ---
 
