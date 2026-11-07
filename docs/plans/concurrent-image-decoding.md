@@ -3,7 +3,7 @@
 **Spec:** [`docs/specs/concurrent-image-decoding.md`](../specs/concurrent-image-decoding.md) (the fork change request, FCR, is quoted verbatim at its end; "FCR §n" below points there)
 **Branch:** `change/concurrent-image-decoding` (cut from `389f939`, tag `v3.8.1`; `3.8.x` untouched)
 **Date:** 2026-11-07
-**Status:** approved
+**Status:** implemented — Increments 1–2 by `abs.build` (2026-11-07); Increments 3–7 are the release half's and the operators'
 
 ## Context
 
@@ -295,7 +295,7 @@ in this increment, so it was run with `-Dmaven.test.failure.ignore=true` to see 
 
 ---
 
-### - [ ] 2. Concurrent decoding (FCR §5 task 4) — the pool and its property, queue removal on cancel, a reader safe for concurrent decodes, the released-buffer decision
+### - [x] 2. Concurrent decoding (FCR §5 task 4) — the pool and its property, queue removal on cancel, a reader safe for concurrent decodes, the released-buffer decision
 
 **Covers:** AC-1, AC-4, AC-5 (red → green); AC-2, AC-3, AC-6, AC-7, AC-8 (green again)
 **ATDD Scenarios:** Increment 1's tests, unchanged, plus:
@@ -444,6 +444,22 @@ test now fails (the thread waits in `expungeStaleEntries`), and it passes on the
 removed. The first AC-5 scenario's comments and descriptions now give its reason as the deferred reset (`dis` and
 `tsuid` are the parse state a reset clears); its trigger, data and assertions are unchanged. `weasis-core-api` now
 runs 37 tests and `weasis-dicom-codec` 18.
+
+**Build record (2026-11-07):** implementation `441ec0ed4`; final-review repairs `66e5a54fd`, `7b8bd4bce`,
+`9e3093300` (3 of 3 allowed). Effort: high, as routed. Final review: spec **Fail** (close() during a decode left a
+cached header with a cleared transfer syntax; next RLE frame wrong) → repair 1 → **Pass**; code quality **Changes
+Requested** (deferred reset of a header-cache eviction cleared the transfer syntax under a cached header; header cache
+not locked across readers) and test quality **Changes Requested** (same deferred-reset defect) → repair 2 → code
+**Approved**, test **Changes Requested** (lock test passed with the methods unsynchronized) → repair 3 → test
+**Approved**. Local Quality Gates on tree `045fd2cf1` (= `9e3093300`): `-DskipTests package` exit 0; `test` exit 0 in
+3 of 3 foreground runs, 37 + 18 tests. Secret scan of `389f939..9e3093300`: 0 hits. Coverage delta: unavailable — no
+coverage tool is configured in the cited modules. Open Minor findings, not repaired: AC-6 uses 64×64 frames with no
+witness that native decodes overlapped (relevant to Increments 4–7); `Thumbnail`'s interrupt path has no test of its
+own (it calls the tested `ImageElement` helper); the cached header takes its transfer syntax from the shared field, so
+a `close()` racing a header read outside a decode can still cache a null syntax (older race, recorded above as a known
+limitation); `weasis.image.loader.threads` has no upper bound; `IMAGE_LOADER` can be cast and resized; `reset()` runs
+under the header cache's monitor and an override that took the reader's monitor would invert the lock order; formatter
+drift in `ReaderCloseDuringDecodeTest` (Spotless cannot run on JDK 17).
 
 ---
 
