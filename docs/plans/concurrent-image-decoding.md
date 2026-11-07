@@ -74,7 +74,15 @@ No new module or directory. Two internal structures change; the public surface d
 - **`DicomMediaIO`** publishes its fragment index once per reader (built in a local list under the reader's
   monitor, then assigned to a `volatile` field), and counts in-flight decodes around the protected
   `getImageFragment(MediaElement, int)`. A `reset()` that arrives while the count is above zero is deferred and runs
-  exactly once when the count returns to zero.
+  exactly once when the count returns to zero. A `close()` (→ `dispose()`) that arrives meanwhile is deferred whole:
+  the last decode to end removes the reader's header from `HEADER_CACHE` and then resets the reader, as a `close()`
+  with no decode in flight does. A decode takes the transfer syntax in the same `synchronized` call as its header
+  read, not from the parse state another decode's header read clears and sets again. *Build-time deviation:* the
+  count and the pending reset and dispose are guarded by a private lock of the reader (`decodeLock`), not by its
+  monitor. `readMetaData()` holds the monitor during header I/O, and its `HEADER_CACHE.get` / `put` can run another
+  reader's `reset()` through the soft cache's removal callback, so a `reset()` on the monitor could deadlock two
+  readers. The private lock is never held while decoding or while calling `HEADER_CACHE`, so no two readers' locks
+  nest.
 
 ```
 caller thread ──getImage()──▶ startImageLoading() ──submit(Load)──▶ IMAGE_LOADER (= private ThreadPoolExecutor, n daemon threads)
@@ -118,7 +126,7 @@ caller thread ──getImage()──▶ startImageLoading() ──submit(Load)�
 - `weasis-dicom/weasis-dicom-codec/src/main/java/org/weasis/dicom/codec/DicomMediaIO.java:714-729` — public / protected `getImageFragment`: the in-flight counter wraps the protected call.
 - `weasis-dicom/weasis-dicom-codec/src/main/java/org/weasis/dicom/codec/DicomMediaIO.java:1110-1150` — `buildSegmentedImageInputStream()` multi-fragment branch: the index build moves into a local list.
 - `weasis-dicom/weasis-dicom-codec/src/main/java/org/weasis/dicom/codec/DicomMediaIO.java:1180-1206` — `dispose()` / `reset()` / `resetInternalState()`: the reset that is deferred.
-- `weasis-dicom/weasis-dicom-codec/src/main/java/org/weasis/dicom/codec/DicomMediaIO.java:1217` — `readMetaData()` is already `synchronized` on the reader: the reader's monitor is the lock the index build and the counter use.
+- `weasis-dicom/weasis-dicom-codec/src/main/java/org/weasis/dicom/codec/DicomMediaIO.java:1217` — `readMetaData()` is already `synchronized` on the reader: the reader's monitor is the lock the index build uses, and the decode reads the transfer syntax under it with the header. *Build-time deviation:* the counter uses a private lock of the reader instead (see Architecture), because a `reset()` on the monitor could deadlock two readers through `HEADER_CACHE`.
 
 **Middleware / framework primitives:**
 - `java.util.concurrent.ThreadPoolExecutor` with `LinkedBlockingQueue` and `remove(Runnable)` — the pool and the queue removal FCR §2 item 1 names; `Future` returned by `submit` is the queued `FutureTask`.
@@ -186,7 +194,7 @@ Scenario: AC-5 close() during a decode
   When thread T1 calls the reader's getImageFragment() for frame 3 directly, and once "started" fires thread T2 calls close() and returns, then the latch opens
   Then T1's image equals an undisturbed decode of frame 3
   And after T1 returns, the reader's iis, dis and tsuid are null, as after a close() with no decode in flight
-  # unchanged code: close() clears them under the decode; the decode reopens the stream → state not cleared after → FAIL (expected RED)
+  # unchanged code: close() clears dis and tsuid under the held decode → the test's check, made after close() returns while the decode is still held, that dis and tsuid are still set fails first → FAIL (expected RED)
 
 Scenario: AC-6 each syntax from 8 threads, own element and reader
   Given single-frame 64×64 fixtures in explicit VR little endian, deflated, RLE lossless, JPEG baseline, JPEG lossless, JPEG-LS lossless, JPEG-LS near-lossless, JPEG 2000 lossless, JPEG 2000 lossy
@@ -321,12 +329,17 @@ Scenario: a queued task is removed when its caller is interrupted
   (re-checking for null), then assigns an unmodifiable copy; later decodes read the published list without the
   lock. The size check (`:1133`) is unchanged.
 - `DicomMediaIO.java:714-729`, `:1188-1206`: the public `getImageFragment(MediaElement)` increments an in-flight
-  count (guarded by the reader's monitor) before calling the protected `getImageFragment(MediaElement, int)` and
-  decrements it in `finally`; the counter wraps the protected call, so a subclass override sits inside it.
-  `reset()` takes the same monitor: with decodes in flight it marks a reset pending and returns; the decrement
-  that reaches zero runs `resetInternalState()` once and clears the mark. The monitor is not held during the native
-  decode, so decodes of one reader still run in parallel. The unused `readingImage` flag (`:305`) is folded into
-  the counter; `readingHeader` keeps today's behaviour. `dispose()` and `close()` keep their signatures.
+  count (guarded by a private lock of the reader, `decodeLock` — *build-time deviation* from the reader's monitor
+  planned here, for the reason given in Architecture) before calling the protected
+  `getImageFragment(MediaElement, int)` and decrements it in `finally`; the counter wraps the protected call, so a
+  subclass override sits inside it. `reset()` takes the same private lock: with decodes in flight it marks a reset
+  pending and returns; the decrement that reaches zero runs `resetInternalState()` once and clears the mark. A
+  `dispose()` (from `close()`) with decodes in flight marks a dispose pending as well: the decrement that reaches
+  zero removes the header from `HEADER_CACHE` outside the private lock, then, under it and only if the count is
+  still zero, runs `resetInternalState()` and clears both marks. The private lock is not held during the native
+  decode, so decodes of one reader still run in parallel. The decode takes the transfer syntax in one
+  `synchronized` call with its header read. The unused `readingImage` flag (`:305`) is folded into the counter;
+  `readingHeader` keeps today's behaviour. `dispose()` and `close()` keep their signatures.
 - **Released-buffer guard (FCR §2 item 5; spec §8 Q4):** `PlanarImage` in `weasis-core-img` 4.5.3 declares no
   method that reports a released buffer (only `release()`, `close()`, `physicalBytes()`, sizes and `get`/
   `assignTo`; `ImageCV extends Mat`). Check upstream `v4.7.2`'s `isBufferReleased` against that API: if it needs a
@@ -384,6 +397,14 @@ modules is `GuiExecutor`, which throws `UnsupportedOperationException` from them
 monitor. `readMetaData()` holds the monitor during header I/O. Its `HEADER_CACHE.put` can reach another reader's
 `reset()` through the soft cache's removal callback, so a `reset()` on the monitor could deadlock two readers. With the
 private lock, `reset()` never waits for a header read. The fragment index is still built under the reader's monitor.
+*Final-review repair (2026-11-07):* a `close()` during a decode removed the header from `HEADER_CACHE` at once and
+deferred only the reset, so the decode cached the header again and the deferred reset then left a cached header with
+`tsuid` and `dis` cleared: the next decode of another frame of a multi-frame RLE lossless reader returned wrong
+pixels. Now the whole `dispose()` is deferred (header removal outside the private lock, then the reset), and the decode
+takes the transfer syntax with its header read under the monitor. AC-5 gains a second scenario in
+`ReaderCloseDuringDecodeTest` (RLE lossless, 8 frames): after the decode held during `close()` ends, the header is no
+longer cached and frame 4 decoded on the same reader equals its undisturbed decode; it failed on the code before the
+repair (both checks) and passes after. The first scenario is unchanged. `weasis-dicom-codec` now runs 14 tests.
 
 ---
 
@@ -525,8 +546,8 @@ spec §8 Q1. A platform the product does not ship on is a valid reason.
 | `DicomMediaIO` / `DicomImageElement` reach OSGi-only statics (preferences, bundle context) outside a framework, which is why the existing codec tests use PowerMock | 1 | Increment 1 starts with a smoke test that opens one generated file and decodes one frame outside OSGi; if a static needs a framework, stub it in the test (PowerMock is already a test dependency) and record which one |
 | The native library cannot be loaded in the test JVM (wrong classifier, missing download) | 1, 4, 5, 6 | OS/arch profiles; the loader fails with `os.name` / `os.arch`; verified first on Windows x86-64 in Increment 1 |
 | `Imgcodecs.dicomJpgWrite` cannot produce a syntax (e.g. JPEG-LS near-lossless) or a split codestream is not recognised as one frame | 1 | Check each generated fixture by a serial decode first; if a syntax cannot be generated, stop and ask before committing a fixture (no patient data, generator kept with the test) |
-| AC-5 does not go red on the unchanged code because `readMetaData()` reopens the stream mid-decode | 1 | The red comes from the post-decode check (stream and parse state not cleared after the decode ends); confirm the failure message names that check |
-| Lock interplay: the cache eviction calls `reader.close()` (`ImageElement.java:51-55`) while a decode holds the reader's monitor in `readMetaData()` | 2 | `reset()` only takes the monitor briefly to read the count and mark pending; no other lock is taken under it; AC-5 and AC-4 run with eviction-free and close-during-decode paths |
+| AC-5 does not go red on the unchanged code because `readMetaData()` reopens the stream mid-decode | 1 | The red comes first from the check made after `close()` returns while the decode is still held (`dis` and `tsuid` already cleared under the decode), before the post-decode check is reached; confirm the failure message names that check |
+| Lock interplay: the cache eviction calls `reader.close()` (`ImageElement.java:51-55`) while a decode holds the reader's monitor in `readMetaData()` | 2 | *Build-time deviation:* `reset()` and `dispose()` take a private lock of the reader (`decodeLock`), not its monitor, only briefly to read the count and mark a reset or dispose pending, so they never wait for a header read; no other lock is taken under it, and `HEADER_CACHE` (whose removal callback runs another reader's `reset()`) is only called outside it, so the only lock order is a reader's monitor before any reader's private lock and no two private locks nest; AC-5 (both scenarios) and AC-4 run with eviction-free and close-during-decode paths |
 | Daemon pool threads change shutdown behaviour (today's thread is non-daemon) | 2 | Required by FCR §2 item 1; nothing in the cited modules joins `IMAGE_LOADER` at shutdown (check with a search in Increment 2) |
 | Memory pressure from several concurrent decodes | 2 | Upstream formula caps threads at `maxHeapMB / 100`; the out-of-memory retry (`ImageElement.java:371-378`) is unchanged; `weasis.image.loader.threads=1` is the field fallback |
 | A Rosetta 2 run is not taken as evidence for macOS x86-64 | 6, 7 | The record states the translation; the release approver accepts it or records an exception |

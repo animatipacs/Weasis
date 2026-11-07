@@ -310,14 +310,21 @@ public class DicomMediaIO implements DcmMediaReader {
   private volatile boolean readingHeader = false;
 
   /**
-   * Guards {@link #decodesInFlight} and {@link #resetPending}. It is not the reader's monitor, so
-   * that a reset never waits for a header read, and it is never held while decoding.
+   * Guards {@link #decodesInFlight}, {@link #resetPending} and {@link #disposePending}. It is not
+   * the reader's monitor, so that a reset never waits for a header read, and it is never held while
+   * decoding or while calling {@link #HEADER_CACHE}, whose removal callback takes the lock of
+   * another reader.
    */
   private final Object decodeLock = new Object();
   /** The decodes of this reader in progress: a reset meanwhile is deferred until none is left. */
   private int decodesInFlight = 0;
   /** A reset arrived while decodes were in progress; the last one to end runs it, once. */
   private boolean resetPending = false;
+  /**
+   * The deferred reset comes from {@link #dispose()}: the last decode to end also removes the
+   * header from {@link #HEADER_CACHE}, as a dispose with no decode in progress does.
+   */
+  private boolean disposePending = false;
 
   private final FileCache fileCache;
 
@@ -740,17 +747,25 @@ public class DicomMediaIO implements DcmMediaReader {
     return null;
   }
 
-  /** Ends a decode counted by {@link #getImageFragment(MediaElement)}; runs a deferred reset. */
+  /**
+   * Ends a decode counted by {@link #getImageFragment(MediaElement)}; the last one to end runs a
+   * deferred reset, and a deferred dispose with it.
+   */
   private void endDecode() {
     synchronized (decodeLock) {
       decodesInFlight--;
-      if (decodesInFlight == 0 && resetPending) {
+      if (decodesInFlight > 0 || !resetPending) {
+        return;
+      }
+      if (!disposePending) {
         resetPending = false;
         if (!readingHeader) {
           resetInternalState();
         }
+        return;
       }
     }
+    removeHeaderAndReset();
   }
 
   protected PlanarImage getImageFragment(MediaElement media, int frame) throws Exception {
@@ -848,10 +863,9 @@ public class DicomMediaIO implements DcmMediaReader {
     FileCache cache = media.getFileCache();
     Optional<File> cacheOriginalFile = cache.getOriginalFile();
     if (cacheOriginalFile.isPresent()) {
-      readMetaData();
-      String syntax = tsuid;
-      boolean rawData = !compressedData || isRLELossless();
-      ExtendSegmentedInputImageStream extParams = buildSegmentedImageInputStream(frame);
+      String syntax = readTransferSyntax();
+      boolean rawData = !compressedData || UID.RLELossless.equals(syntax);
+      ExtendSegmentedInputImageStream extParams = buildSegmentedImageInputStream(frame, syntax);
 
       if (extParams.getSegmentPositions() != null) {
 
@@ -1108,12 +1122,8 @@ public class DicomMediaIO implements DcmMediaReader {
     return (Series<MediaElement>) series;
   }
 
-  private boolean isRLELossless() {
-    return dis != null && dis.getTransferSyntax().equals(UID.RLELossless);
-  }
-
-  private ExtendSegmentedInputImageStream buildSegmentedImageInputStream(int frameIndex)
-      throws IOException {
+  private ExtendSegmentedInputImageStream buildSegmentedImageInputStream(
+      int frameIndex, String syntax) throws IOException {
     long[] offsets;
     int[] length;
 
@@ -1150,7 +1160,7 @@ public class DicomMediaIO implements DcmMediaReader {
           }
         } else {
           // Multi-frames where each frames can have multiple fragments.
-          List<Integer> positions = getFragmentsPositions(nbFragments);
+          List<Integer> positions = getFragmentsPositions(nbFragments, syntax);
           if (positions.size() == numberOfFrame) {
             int start = positions.get(frameIndex);
             int end =
@@ -1176,16 +1186,18 @@ public class DicomMediaIO implements DcmMediaReader {
   /**
    * Returns the index of the first fragment of each frame, built by the first caller under the
    * reader's lock in a local list and then published, so that concurrent decodes of frames of this
-   * reader never fill it together.
+   * reader never fill it together. {@code syntax} is the transfer syntax the decode read with the
+   * header.
    */
-  private List<Integer> getFragmentsPositions(int nbFragments) throws IOException {
+  private List<Integer> getFragmentsPositions(int nbFragments, String syntax)
+      throws IOException {
     List<Integer> positions = fragmentsPositions;
     if (positions == null) {
       synchronized (this) {
         positions = fragmentsPositions;
         if (positions == null) {
           List<Integer> list = new ArrayList<>();
-          boolean jpeg2000 = tsuid.startsWith("1.2.840.10008.1.2.4.9");
+          boolean jpeg2000 = syntax.startsWith("1.2.840.10008.1.2.4.9");
           try (ImageInputStream srcStream = ImageIO.createImageInputStream(new File(uri))) {
             for (int i = 1; i < nbFragments; i++) {
               BulkData bulkData = (BulkData) pixeldataFragments.get(i);
@@ -1229,9 +1241,38 @@ public class DicomMediaIO implements DcmMediaReader {
   }
 
   public void dispose() {
-    HEADER_CACHE.remove(this);
     readingHeader = false;
-    reset();
+    synchronized (decodeLock) {
+      if (decodesInFlight > 0) {
+        // The last decode in progress removes the header and resets the reader when it ends.
+        resetPending = true;
+        disposePending = true;
+        return;
+      }
+    }
+    removeHeaderAndReset();
+  }
+
+  /**
+   * Removes the header from {@link #HEADER_CACHE}, then resets the reader unless a decode started
+   * meanwhile, in which case the last decode to end does both again. Called without {@link
+   * #decodeLock}: the cache's removal callback runs {@link #reset()} of other readers, so calling
+   * the cache under this lock would nest the locks of two readers.
+   */
+  private void removeHeaderAndReset() {
+    HEADER_CACHE.remove(this);
+    synchronized (decodeLock) {
+      if (decodesInFlight > 0) {
+        resetPending = true;
+        disposePending = true;
+      } else {
+        resetPending = false;
+        disposePending = false;
+        if (!readingHeader) {
+          resetInternalState();
+        }
+      }
+    }
   }
 
   @Override
@@ -1261,6 +1302,16 @@ public class DicomMediaIO implements DcmMediaReader {
 
   public DicomMetaData getStreamMetadata() throws IOException {
     return readMetaData();
+  }
+
+  /**
+   * Reads the header, if it is not cached, and returns the transfer syntax read with it, both under
+   * the reader's lock. A header read clears the transfer syntax and sets it again under that lock,
+   * so a decode never sees it cleared by the header read of another decode of this reader.
+   */
+  private synchronized String readTransferSyntax() throws IOException {
+    readMetaData();
+    return tsuid;
   }
 
   /**

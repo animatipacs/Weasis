@@ -13,9 +13,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.File;
 import java.lang.reflect.Field;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import org.assertj.core.api.SoftAssertions;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Test;
@@ -38,6 +40,10 @@ import org.weasis.opencv.data.PlanarImage;
  * close()} that waits instead; that design would not return while the decode is held). {@code dis}
  * and {@code tsuid} carry the reset check: {@code iis} is null after every header read, so its
  * check holds for any implementation.
+ *
+ * <p>A second scenario, on a multi-frame RLE lossless reader, checks what that reset leaves behind:
+ * the reader's header is no longer in the header cache, as after a {@code close()} with no decode
+ * in flight, and a decode of another frame on the same reader equals its undisturbed decode.
  */
 public class ReaderCloseDuringDecodeTest {
 
@@ -152,6 +158,113 @@ public class ReaderCloseDuringDecodeTest {
             dis,
             tsuid)
         .containsOnlyNulls();
+  }
+
+  /**
+   * The same close() during a decode, on a multi-frame RLE lossless reader, where the next decode
+   * depends on the transfer syntax the reader holds: once the held decode has ended, the reset of
+   * the close() has run as after a close() with no decode in flight, which includes the removal of
+   * the reader's header from the header cache, and a decode of another frame on the same reader
+   * equals its undisturbed decode. A close() reaches a reader whose other frames are still in use
+   * when the image cache evicts one of its frames.
+   */
+  @Test
+  public void closeDuringADecodeLeavesTheReaderReadyToDecodeAnotherFrame() throws Exception {
+    File rle =
+        SyntheticDicomFiles.write(
+            FOLDER.newFile("multiframe-rle.dcm"), Syntax.RLE_LOSSLESS, ROWS, COLUMNS, FRAMES, 1);
+    int nextFrame = FRAME + 1;
+    byte[] undisturbedNext = undisturbedDecodeOfFrame(rle, nextFrame);
+
+    GatedDicomMediaIO reader = new GatedDicomMediaIO(rle);
+    MediaElement[] elements = reader.getMediaElement();
+    assertThat(elements).hasSize(FRAMES);
+
+    AtomicReference<byte[]> decoded = new AtomicReference<>();
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread decoder =
+        new Thread(
+            () -> {
+              try {
+                decoded.set(decode(reader, elements[FRAME]));
+              } catch (Throwable e) {
+                failure.set(e);
+              }
+            },
+            "rle-frame-decoder");
+    Thread closer = new Thread(reader::close, "rle-reader-closer");
+    try {
+      decoder.start();
+      assertThat(reader.started.await(10, TimeUnit.SECONDS))
+          .as("the decode of RLE frame %d started", FRAME)
+          .isTrue();
+      closer.start();
+      closer.join(TimeUnit.SECONDS.toMillis(10));
+      assertThat(closer.isAlive()).as("close() returned within 10 s").isFalse();
+    } finally {
+      reader.release.countDown();
+      decoder.join(TimeUnit.SECONDS.toMillis(30));
+    }
+    assertThat(decoder.isAlive()).as("the decode ended within 30 s").isFalse();
+    assertThat(failure.get()).as("failure of the decode during close()").isNull();
+    assertThat(decoded.get())
+        .as("RLE frame %d decoded while close() ran equals an undisturbed decode", FRAME)
+        .isEqualTo(SyntheticDicomFiles.pixels(ROWS, COLUMNS, FRAME));
+
+    boolean headerCachedAfter = headerCache().containsKey(reader);
+    Object tsuidAfter = field(reader, "tsuid");
+    byte[] next = decode(reader, elements[nextFrame]);
+
+    SoftAssertions softly = new SoftAssertions();
+    softly
+        .assertThat(next)
+        .as(
+            "RLE frame %d decoded on the same reader after the decode held during close() ended"
+                + " (tsuid=%s then) equals its undisturbed decode",
+            nextFrame,
+            tsuidAfter)
+        .isEqualTo(undisturbedNext);
+    softly
+        .assertThat(headerCachedAfter)
+        .as(
+            "the reader's header is still in the header cache after the decode held during close()"
+                + " ended, unlike after a close() with no decode in flight")
+        .isFalse();
+    softly.assertAll();
+  }
+
+  private static byte[] decode(DicomMediaIO reader, MediaElement element) throws Exception {
+    PlanarImage img = reader.getImageFragment(element);
+    try {
+      return SyntheticDicomFiles.bytesOf(img);
+    } finally {
+      if (img != null) {
+        img.release();
+      }
+    }
+  }
+
+  /**
+   * The undisturbed decode of a frame of the given file, through a plain reader that is then closed
+   * with no decode in flight; checks that the close() removed the reader's header from the cache.
+   */
+  private static byte[] undisturbedDecodeOfFrame(File source, int frame) throws Exception {
+    DicomMediaIO reader = new DicomMediaIO(source);
+    byte[] pixels = decode(reader, reader.getMediaElement()[frame]);
+    reader.close();
+    assertThat(pixels)
+        .as("undisturbed decode of frame %d of %s", frame, source.getName())
+        .isEqualTo(SyntheticDicomFiles.pixels(ROWS, COLUMNS, frame));
+    assertThat(headerCache().containsKey(reader))
+        .as("header cached after a close() with no decode in flight")
+        .isFalse();
+    return pixels;
+  }
+
+  private static Map<?, ?> headerCache() throws Exception {
+    Field field = DicomMediaIO.class.getDeclaredField("HEADER_CACHE");
+    field.setAccessible(true);
+    return (Map<?, ?>) field.get(null);
   }
 
   /**
