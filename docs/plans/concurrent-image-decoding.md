@@ -3,7 +3,7 @@
 **Spec:** [`docs/specs/concurrent-image-decoding.md`](../specs/concurrent-image-decoding.md) (the fork change request, FCR, is quoted verbatim at its end; "FCR §n" below points there)
 **Branch:** `change/concurrent-image-decoding` (cut from `389f939`, tag `v3.8.1`; `3.8.x` untouched)
 **Date:** 2026-11-07
-**Status:** implemented — Increments 1–2 by `abs.build` (2026-11-07); Increments 3–7 are the release half's and the operators'
+**Status:** implemented — Increments 1–2 by `abs.build` (2026-11-07); Increments 3–7 by the release half and the operators (2026-11-09)
 
 ## Context
 
@@ -463,7 +463,7 @@ drift in `ReaderCloseDuringDecodeTest` (Spotless cannot run on JDK 17).
 
 ---
 
-### - [ ] 3. Internal version (FCR §5 task 5) — hand-off to the release half
+### - [x] 3. Internal version (FCR §5 task 5) — hand-off to the release half
 
 **Executed by:** the release half (`weasis-fork-patch`, release). **`abs.build` does not execute this increment.**
 **Covers:** AC-10
@@ -488,9 +488,18 @@ repository.
 **Complexity:** trivial — one property value, inherited by every module
 **Run note:** none of spec §10's items; spec §8 Q5 (FCR §5 order vs the release procedure's order) is the release approver's.
 
+**Release record (2026-11-09):** the release half set `revision` to `3.8.2` in `weasis-parent/pom.xml`, with
+`changelist` already empty, in commit `756d80dcf` (`Release 3.8.2`). No other POM changed. The command
+`mvn -B -pl weasis-core/weasis-core-api,weasis-dicom/weasis-dicom-codec -am -DskipTests package` exited 0 and
+produced `weasis-core-api-3.8.2.jar` and `weasis-dicom-codec-3.8.2.jar`. Before the version change, the two Local
+Quality Gates ran green again on `b3b980fba`, with 37 + 18 tests. Order: FCR §5's order ran (spec §8 Q5). The
+version was set first, then the platform checks of Increments 4–6 ran on the version commit. An informal
+pre-validation of the same test on `3.8.1` (`b3b980fba`) had passed on the three machines earlier the same day. It is
+not this plan's record.
+
 ---
 
-### - [ ] 4. Native thread-safety on Windows x86-64 (FCR §5 task 6) — this machine
+### - [x] 4. Native thread-safety on Windows x86-64 (FCR §5 task 6) — this machine
 
 **Executed by:** the operator on this machine (Windows 11, x86-64), in a foreground session.
 **Covers:** AC-6 (platform run), AC-11 (Windows x86-64)
@@ -512,9 +521,14 @@ under concurrency: report back; nothing is released.
 **Complexity:** standard — runs an existing test; the risk is a real native-codec finding
 **Run note:** spec §10 item 4 — the result, where it is recorded, by which role, on which date.
 
+**Platform record (2026-11-09, operator):** green on `756d80dcf` (3.8.2). Windows 11 x86-64, Maven 3.9.6 on JDK
+17.0.13 (Temurin, x64). The `windows-x86-64` profile copied `opencv_java-4.5.3-dcm-windows-x86-64.dll`. The log reads
+"Native codec loaded … OpenCV 4.5.3, os.arch=amd64". All 9 syntaxes were pixel-identical, 160/160 (20 rounds × 8
+threads). `Tests run: 1, Failures: 0, Errors: 0, Skipped: 0`, BUILD SUCCESS.
+
 ---
 
-### - [ ] 5. Native thread-safety on Linux x86-64 (FCR §5 task 6) — the dual-boot notebook
+### - [x] 5. Native thread-safety on Linux x86-64 (FCR §5 task 6) — the dual-boot notebook
 
 **Executed by:** the operator on the notebook, booted into Linux.
 **Covers:** AC-6 (platform run), AC-11 (Linux x86-64)
@@ -535,9 +549,16 @@ platform under Increment 7); run; keep the report. Stop rule as Increment 4.
 **Complexity:** standard — first run of the native profile on Linux; dependency resolution of the `.so` is new there
 **Run note:** spec §10 item 4.
 
+**Platform record (2026-11-09, operator):** green on `756d80dcf` (3.8.2), on the notebook booted into Linux x86-64.
+The source was the GitHub archive of that commit, because no git client was installed. Temurin JDK 17 x64 and
+Maven 3.9.9, both unpacked under the user's home. The `linux-x86-64` profile copied
+`libopencv_java-4.5.3-dcm-linux-x86-64.so`. The log reads "Native codec loaded … os.name=Linux, os.arch=amd64". All 9
+syntaxes were pixel-identical, 160/160. `Tests run: 1, Failures: 0, Errors: 0, Skipped: 0`, BUILD SUCCESS, with the
+reactor at 3.8.2.
+
 ---
 
-### - [ ] 6. Native thread-safety on macOS x86-64 (FCR §5 task 6) — Apple Silicon Mac through Rosetta 2
+### - [x] 6. Native thread-safety on macOS x86-64 (FCR §5 task 6) — Apple Silicon Mac through Rosetta 2
 
 **Executed by:** the operator on the Mac.
 **Covers:** AC-6 (platform run), AC-11 (macOS x86-64)
@@ -560,9 +581,15 @@ that the run was under Rosetta 2 on Apple Silicon. Stop rule as Increment 4.
 **Complexity:** standard — the platform is reached through translation, which the record must state
 **Run note:** spec §10 item 4.
 
+**Platform record (2026-11-09, operator):** green on `756d80dcf` (3.8.2). The run was **under Rosetta 2 on Apple
+Silicon** (Apple M4, macOS 26.6.2). It used Temurin JDK 17.0.18 x64 (`os.arch = x86_64`) and Maven 3.9.9 on that
+JDK (arch `x86_64`). The `mac` profile copied `libopencv_java-4.5.3-dcm-macosx-x86-64.jnilib`. The log reads "Native
+codec loaded … os.name=Mac OS X, os.arch=x86_64". All 9 syntaxes were pixel-identical, 160/160.
+`Tests run: 1, Failures: 0, Errors: 0, Skipped: 0`, BUILD SUCCESS, with the reactor at 3.8.2.
+
 ---
 
-### - [ ] 7. Platforms with no machine (FCR §5 task 6) — exceptions by the release approver
+### - [x] 7. Platforms with no machine (FCR §5 task 6) — exceptions by the release approver
 
 **Executed by:** the release approver (role and date only, never a name).
 **Covers:** AC-11 (Windows x86, Linux x86, Linux armv7a, Linux aarch64)
@@ -582,6 +609,10 @@ spec §8 Q1. A platform the product does not ship on is a valid reason.
 **Reuses:** the spec's *Verified* row and §10 item 4
 **Complexity:** trivial — a record, no code
 **Run note:** spec §10 item 4.
+
+**Exception record (2026-11-09, product owner):** Windows x86, Linux x86, Linux armv7a and Linux aarch64 have no
+run. The release approver, in the product owner role, recorded an exception for each of them: none of these
+platforms is a distribution target at present. This closes spec §8 Q1.
 
 ## Context Loading Order
 

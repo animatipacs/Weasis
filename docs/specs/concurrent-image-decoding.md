@@ -15,7 +15,7 @@ FCR's own text, which follows verbatim at the end, after the run notes of §10.
 | **Citations** | Every `path:line` of FCR §1–§3 read at `389f939` on 2026-11-05: each says what the FCR says |
 | **Scan** | deny list of 4016 names · probe → 2 hits (exit 1) · the FCR copy, this file and the context layer → 0 hits (exit 0), 2026-11-05 |
 | **Plan** | `docs/plans/concurrent-image-decoding.md` — written by `abs.plan`; its increments follow FCR §5 in order |
-| **Verified** | — §3 re-run on the build: *(the release half)*; platform checks: *(the release half; §8 row 1)* |
+| **Verified** | §3 re-run on the build, 2026-11-09: both Local Quality Gates green on `b3b980fba` (`package` exit 0; `test` 37 + 18 tests, 0 failures). Platform checks, AC-6 and AC-11, on `756d80dcf` (3.8.2), 2026-11-09: Windows x86-64, Linux x86-64 and macOS x86-64 (under Rosetta 2 on Apple Silicon) green, 160/160 pixel-identical decodes per syntax. Windows x86, Linux x86, Linux armv7a and Linux aarch64 have an exception recorded by the release approver (product owner, 2026-11-09): not a distribution target at present (§8 Q1; §10 item 4) |
 | **Release approval** | — *(the release half: role and date only, never a name)* |
 | **Released** | — *(the release half: version · tag · date)* |
 | **Status** | `approved senior software architect, 2026-10-29` — copied from the FCR's public-safe sign-off row: role and date only |
@@ -262,10 +262,26 @@ these notes before it asks for the release approval.** This section is scanned w
    plan's Increment 2, *Gate record*.
 3. **The leak scan.** Whether the leak scan caught what the FCR's banner forbids: the probe's hit count, and each
    scanned file's count (the diff, the commit messages, each document under `docs/` and the context layer).
-   — *to fill in*
+   — The scan ran on 2026-11-09 with the operator's deny list, each input copied outside the checkout, over
+   `389f939..HEAD`. The probe hit 1 of 1. The commit messages had 0 hits. The diff had 2 hits, and the documents
+   under `docs/` with the context layer had 2. All four are the same word: an ordinary English verb, used as a verb
+   in one sentence of the plan and one of this spec. The operator reviewed them and accepted them as not
+   identifying, so they were kept unreworded. One earlier hit was a test helper's class name. It was renamed in
+   every commit before the branch was first pushed.
 4. **The platform checks.** How FCR §5 task 6's per-platform results, and any exception, were recorded (where,
    by which role, on which date).
-   — *to fill in*
+   — Each result is recorded in the plan's Increments 4–7 and in this spec's header *Verified* row. FCR §5's order
+   ran (§8 Q5): the version was set first, in `756d80dcf` (`Release 3.8.2`), and the platform checks then ran on
+   that commit, all on 2026-11-09, with `mvn -B -pl weasis-dicom/weasis-dicom-codec -am test
+   -Dtest=ConcurrentSyntaxDecodeTest -Dsurefire.failIfNoSpecifiedTests=false`.
+   - Windows x86-64: on the operator's machine, green.
+   - Linux x86-64: on the notebook booted into Linux, run by the operator, green.
+   - macOS x86-64: on an Apple Silicon Mac under Rosetta 2 with an x86-64 JDK 17, run by the operator, green.
+
+   Each run loaded its platform's `4.5.3-dcm` native library and decoded the nine syntaxes 160 of 160
+   pixel-identical. The release approver, in the product owner role, recorded an exception on 2026-11-09 for
+   Windows x86, Linux x86, Linux armv7a and Linux aarch64: none is a distribution target at present. This closes
+   §8 Q1. An informal pre-validation on `3.8.1` (`b3b980fba`) had passed on the same three machines earlier that day.
 
 ---
 
