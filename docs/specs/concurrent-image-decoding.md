@@ -16,7 +16,7 @@ FCR's own text, which follows verbatim at the end, after the run notes of §10.
 | **Scan** | deny list of 4016 names · probe → 2 hits (exit 1) · the FCR copy, this file and the context layer → 0 hits (exit 0), 2026-11-05 |
 | **Plan** | `docs/plans/concurrent-image-decoding.md` — written by `abs.plan`; its increments follow FCR §5 in order |
 | **Verified** | §3 re-run on the build, 2026-11-09: both Local Quality Gates green on `b3b980fba` (`package` exit 0; `test` 37 + 18 tests, 0 failures). Platform checks, AC-6 and AC-11, on `756d80dcf` (3.8.2), 2026-11-09: Windows x86-64, Linux x86-64 and macOS x86-64 (under Rosetta 2 on Apple Silicon) green, 160/160 pixel-identical decodes per syntax. Windows x86, Linux x86, Linux armv7a and Linux aarch64 have an exception recorded by the release approver (product owner, 2026-11-09): not a distribution target at present (§8 Q1; §10 item 4) |
-| **Release approval** | — *(the release half: role and date only, never a name)* |
+| **Release approval** | senior software architect, 2026-11-09 |
 | **Released** | — *(the release half: version · tag · date)* |
 | **Status** | `approved senior software architect, 2026-10-29` — copied from the FCR's public-safe sign-off row: role and date only |
 
